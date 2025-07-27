@@ -3,7 +3,8 @@ Intended for lathe spindle control by Ethernet.
 No axes control.
 
 # Hardware
-This repository is for STM32F103C8 or STM32F103CB
+This repository is for STM32F103C8 or STM32F103CB and W5500 boards.
+The connection wires between STM32 and W5500 must be as short as possible.
 
 # Tests
 Tested on real machine with 2500 p/r encoder and ~1500 rpm.
