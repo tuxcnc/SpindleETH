@@ -1,0 +1,204 @@
+/*    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+component SpindleETH "SpindleETH";
+
+pin out float   encoder_raw         = 0.0   "Encoder raw counts";
+pin in  float   pos_scale	    = 120.0 "Scaling factor for pos";
+pin out float   pos		    = 0.0   "Position";
+pin out float   vel		    = 0.0   "Velocity";    
+pin in  float   spindle_pwm         = 0.0   "PWM output";
+pin io bit 	index_ena		    "Spindle sync request";
+
+pin in  bit     out.##[11]          = 0     "11 digital outputs from out.00 to out.15";
+pin out bit     in.##[15]           = 0     "16 digital inputs from in.00 to in.14";
+
+pin out bit     ready               = 0     "Module state";
+pin in  bit     enable              = 0     "Module enable";
+pin out s32     packets             = 0     "Lost packets";
+
+/*-------------------------------------*/
+
+option singleton;
+option extra_setup;
+option extra_cleanup;
+
+function _;
+
+license "GPL"; // indicates GPL v2 or later
+;;
+
+/*-------------------------------------*/
+
+#include <arpa/inet.h>
+#include <unistd.h>
+//#include <sys/socket.h>
+//#include "rtapi.h"		/* RTAPI realtime OS API */
+//#include "rtapi_app.h"	/* RTAPI realtime module decls */
+//#include "rtapi_string.h"
+//#include "hal.h"		/* HAL public API decls */
+
+struct FB {
+    uint16_t control;
+    uint16_t io;
+    double enc;
+    double encoder_latched;
+} fb = { 0, 0, 0.0, 0.0 };
+
+struct CMD {
+    uint16_t control;
+    uint16_t io;
+    uint16_t pwm;
+} cmd = { 0, 0, 0 };
+
+double old_pos;
+double latched_enc;
+double encoder_latched_old;
+double delta_pos = 0;
+double delta_time;
+double accum = 0;
+double accum_cache[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+uint8_t accum_index = 0;
+
+#define CTRL_READY    0b0000000000000001
+#define CTRL_ENABLE   0b0000000000000010
+
+#define IO_00 0b0000000000000001
+#define IO_01 0b0000000000000010
+#define IO_02 0b0000000000000100
+#define IO_03 0b0000000000001000
+#define IO_04 0b0000000000010000
+#define IO_05 0b0000000000100000
+#define IO_06 0b0000000001000000
+#define IO_07 0b0000000010000000
+#define IO_08 0b0000000100000000
+#define IO_09 0b0000001000000000
+#define IO_10 0b0000010000000000
+#define IO_11 0b0000100000000000
+#define IO_12 0b0001000000000000
+#define IO_13 0b0010000000000000
+#define IO_14 0b0100000000000000
+#define IO_15 0b1000000000000000
+
+#define BUFSIZE 1500 // 60
+#define SEND_TIMEOUT_US 100
+#define RECV_TIMEOUT_US 100
+#define REMOTE_IP "10.10.10.88"
+#define REMOTE_UDP_PORT 58418
+
+int sockfd, n;
+struct sockaddr_in server;
+struct timeval timeout;
+char txbuf[BUFSIZE];
+char rxbuf[BUFSIZE];
+
+/*-------------------------------------*/
+
+EXTRA_SETUP()
+{
+    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    server.sin_family = AF_INET;
+    server.sin_port = htons(REMOTE_UDP_PORT);
+    server.sin_addr.s_addr = inet_addr(REMOTE_IP);
+    timeout.tv_sec = 0;
+    timeout.tv_usec = RECV_TIMEOUT_US;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    timeout.tv_usec = SEND_TIMEOUT_US;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    recv(sockfd, rxbuf, sizeof(rxbuf), 0); // dummy read, to empty buffer
+    return 0;
+}
+
+EXTRA_CLEANUP()
+{
+    close(sockfd);
+}
+
+FUNCTION(_)
+{
+    if (enable) cmd.control = CTRL_ENABLE;
+    else cmd.control = 0;
+    if (ready) {
+        cmd.control |= CTRL_READY;
+        if (out(0)) cmd.io = IO_00;
+        else cmd.io = 0;
+        if (out(1)) cmd.io |= IO_01;
+        if (out(2)) cmd.io |= IO_02;
+        if (out(3)) cmd.io |= IO_03;
+        if (out(4)) cmd.io |= IO_04;
+        if (out(5)) cmd.io |= IO_05;
+        if (out(6)) cmd.io |= IO_06;
+        if (out(7)) cmd.io |= IO_07;
+        if (out(8)) cmd.io |= IO_08;
+        if (out(9)) cmd.io |= IO_09;
+        if (out(10)) cmd.io |= IO_10;
+        if (spindle_pwm > 1.0f) {
+        cmd.pwm = 0xFFFF;
+        }
+        else {
+        cmd.pwm = (double)spindle_pwm * 65535.0f;
+        }
+        
+    }       
+        
+    memcpy(&txbuf, &cmd, sizeof(cmd));
+    uint8_t chk = 71;
+    for (int i = 0; i < sizeof(cmd); i++) chk ^= txbuf[i];
+    txbuf[sizeof(cmd)] = chk;
+    n = sendto(sockfd, txbuf, sizeof(cmd) + 1, 0, &server, sizeof(server));
+    packets++;
+    if (n < 0) ready = 0;
+    else {
+        n = recv(sockfd, rxbuf, sizeof(fb), 0);
+        if (n < 0) ready = 0;
+        else {
+            packets--;
+            memcpy(&fb, &rxbuf, sizeof(fb));
+            in(0) = fb.io & IO_00;
+            in(1) = fb.io & IO_01;
+            in(2) = fb.io & IO_02;
+            in(3) = fb.io & IO_03;
+            in(4) = fb.io & IO_04;
+            in(5) = fb.io & IO_05;
+            in(6) = fb.io & IO_06;
+            in(7) = fb.io & IO_07;
+            in(8) = fb.io & IO_08;
+            in(9) = fb.io & IO_09;
+            in(10) = fb.io & IO_10;
+            in(11) = fb.io & IO_11;
+            in(12) = fb.io & IO_12;
+            in(13) = fb.io & IO_13;
+            in(14) = fb.io & IO_14;
+	    encoder_raw = fb.enc;
+            ready = fb.control & CTRL_READY;
+            if  ((encoder_latched_old != fb.encoder_latched) && (index_ena)) {
+            latched_enc = fb.encoder_latched;
+	    old_pos = (encoder_raw - latched_enc) / pos_scale;
+            index_ena = false;
+            }
+            encoder_latched_old = fb.encoder_latched;
+        }
+    }
+   pos = (encoder_raw - latched_enc) / pos_scale;
+   // Calculation of the average speed of the last eight periods
+   accum_index++; 
+   accum_index &= 7; 
+   delta_pos -= accum_cache[accum_index];          
+   accum_cache[accum_index] = pos - old_pos; 
+   delta_pos += accum_cache[accum_index];
+   old_pos = pos;
+   delta_time = period * 1e-9 * 8;
+   vel = delta_pos / delta_time;
+}

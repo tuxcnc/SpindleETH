@@ -1,0 +1,18 @@
+
+loadrt  SpindleETH
+addf    SpindleETH   servo-thread
+
+setp SpindleETH.enable 1
+
+# Initialize the encoder (spindle)
+setp SpindleETH.pos-scale 10000
+# connect the hal encoder to linuxcnc
+net spindle-sync     SpindleETH.index-ena spindle.0.index-enable
+net spindle-position SpindleETH.pos => spindle.0.revs
+net spindle-velocity SpindleETH.vel => spindle.0.speed-in
+
+# spindle-0-forward
+net spindle-0-forward spindle.0.forward => SpindleETH.out.03
+
+# spindle-0-reverse
+net spindle-0-reverse spindle.0.reverse => SpindleETH.out.04
